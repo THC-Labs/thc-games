@@ -1,0 +1,6 @@
+{
+  "name": "Portal de Juegos con Amigos",
+  "description": "Un portal de minijuegos diarios para competir con amigos, con chat en vivo, salas personalizadas, notificaciones en tiempo real y clasificaciones diarias y globales.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
