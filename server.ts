@@ -151,6 +151,81 @@ if (!supabaseUrl || !supabaseKey) {
 // Database wrapper implementing Supabase interactions
 class SupaDB {
   
+  // Login / Register User using nickname + 4-digit PIN
+  public async loginOrRegister(nickname: string, pin: string): Promise<{ success: boolean; isNewUser: boolean; message: string }> {
+    const cleanNick = nickname.trim();
+    const cleanPin = pin.trim();
+
+    try {
+      const { data: user, error } = await supabase
+        .from("users")
+        .select("*")
+        .eq("nickname", cleanNick)
+        .maybeSingle();
+
+      if (error) {
+        console.error("❌ Supabase Error fetching user during login:", error.message);
+        return { success: false, isNewUser: false, message: `Error de base de datos: ${error.message}` };
+      }
+
+      if (user) {
+        // User exists, verify PIN
+        if (user.pin === cleanPin) {
+          return { success: true, isNewUser: false, message: "Inicio de sesión correcto." };
+        } else {
+          return { success: false, isNewUser: false, message: "PIN incorrecto. Por favor introduce tu PIN original." };
+        }
+      } else {
+        // User does not exist, register them
+        const { error: insertErr } = await supabase
+          .from("users")
+          .insert({ nickname: cleanNick, pin: cleanPin });
+
+        if (insertErr) {
+          console.error("❌ Supabase Error registering user:", insertErr.message);
+          return { success: false, isNewUser: false, message: `Fallo al registrar usuario: ${insertErr.message}` };
+        }
+
+        return { success: true, isNewUser: true, message: "Usuario registrado e inicio de sesión correcto." };
+      }
+    } catch (e) {
+      console.error("❌ Fallo al procesar login/registro", e);
+      return { success: false, isNewUser: false, message: "Fallo de conexión con la base de datos." };
+    }
+  }
+
+  // Fetch all rooms joined by a specific user
+  public async getUserRooms(nickname: string): Promise<any[]> {
+    const cleanNick = nickname.trim();
+    try {
+      const { data, error } = await supabase
+        .from("room_members")
+        .select(`
+          room_code,
+          rooms (
+            code,
+            name,
+            creator,
+            created_at
+          )
+        `)
+        .eq("nickname", cleanNick);
+
+      if (error || !data) {
+        console.error("❌ Supabase Error fetching user rooms:", error?.message);
+        return [];
+      }
+
+      // Map joint rooms response
+      return data
+        .map((item: any) => item.rooms)
+        .filter((room: any) => room !== null);
+    } catch (e) {
+      console.error("❌ Fallo al obtener las salas del usuario", e);
+      return [];
+    }
+  }
+
   // Get current game of the day (checks settings override first, else deterministically hashes the date)
   public async getDailyGame(): Promise<Game> {
     try {
@@ -282,6 +357,15 @@ class SupaDB {
         console.error("❌ Supabase Error inserting room:", error.message, error.details, error.hint);
         throw new Error(`Supabase insert failed: ${error.message}`);
       }
+
+      // Add creator to room members mapping table
+      const { error: memberError } = await supabase
+        .from("room_members")
+        .insert({ nickname: creator, room_code: code });
+
+      if (memberError) {
+        console.error("❌ Supabase Error inserting room member (creator):", memberError.message, memberError.details);
+      }
     } catch (e) {
       console.error("❌ Fallo al insertar sala en Supabase", e);
       throw e;
@@ -294,6 +378,19 @@ class SupaDB {
   public async joinRoom(code: string, nickname: string): Promise<Room | null> {
     const room = await this.getRoom(code);
     if (!room) return null;
+
+    // Register room member relation in mapping table (duplicate key constraints ignored by upsert)
+    try {
+      const { error: memberError } = await supabase
+        .from("room_members")
+        .upsert({ nickname, room_code: room.code }, { onConflict: "nickname,room_code" });
+      
+      if (memberError) {
+        console.error("❌ Supabase Error inserting room member (join):", memberError.message, memberError.details);
+      }
+    } catch (e) {
+      console.error("❌ Fallo al registrar miembro de sala en Supabase", e);
+    }
 
     const userExists = room.players.some(
       p => p.nickname.toLowerCase() === nickname.toLowerCase()
@@ -625,6 +722,26 @@ app.post("/api/admin/set-game", async (req, res) => {
   } else {
     res.status(400).json({ error: "Juego no encontrado o inválido" });
   }
+});
+
+app.post("/api/auth/login-register", async (req, res) => {
+  const { nickname, pin } = req.body;
+  if (!nickname || !pin) {
+     res.status(400).json({ error: "Faltan parámetros: nickname o pin" });
+     return;
+  }
+  const result = await supaDB.loginOrRegister(nickname, pin);
+  if (result.success) {
+    res.json(result);
+  } else {
+    res.status(401).json({ error: result.message });
+  }
+});
+
+app.get("/api/users/:nickname/rooms", async (req, res) => {
+  const { nickname } = req.params;
+  const rooms = await supaDB.getUserRooms(nickname);
+  res.json({ rooms });
 });
 
 app.post("/api/rooms/create", async (req, res) => {

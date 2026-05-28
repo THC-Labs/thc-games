@@ -33,6 +33,14 @@ export default function App() {
   });
   const [tempNickname, setTempNickname] = useState("");
 
+  const [pin, setPin] = useState<string>(() => {
+    return localStorage.getItem("gameportal_pin") || "";
+  });
+  const [tempPin, setTempPin] = useState("");
+
+  // Joined rooms list
+  const [userRooms, setUserRooms] = useState<any[]>([]);
+
   // Room State
   const [roomCode, setRoomCode] = useState<string>(() => {
     return localStorage.getItem("gameportal_roomcode") || "";
@@ -78,6 +86,25 @@ export default function App() {
     fetchWeeks();
     fetchAllGames();
   }, []);
+
+  // Sync user's joined rooms when nickname is loaded
+  useEffect(() => {
+    if (nickname) {
+      fetchUserRooms();
+    }
+  }, [nickname]);
+
+  const fetchUserRooms = async () => {
+    try {
+      const res = await fetch(`/api/users/${nickname}/rooms`);
+      if (res.ok) {
+        const data = await res.json();
+        setUserRooms(data.rooms || []);
+      }
+    } catch (e) {
+      console.error("Error fetching user rooms", e);
+    }
+  };
 
   // Poll active Room data and Leaderboard regularly
   useEffect(() => {
@@ -138,7 +165,7 @@ export default function App() {
           });
         }
       } else if (res.status === 404) {
-        // Room expired or deleted
+        // Room expired or deleted locally in client state, but check if we should keep it in userRooms
         setRoomCode("");
         localStorage.removeItem("gameportal_roomcode");
       }
@@ -224,18 +251,54 @@ export default function App() {
     }, 4500);
   };
 
-  // Set Profile Nickname
-  const handleSaveNickname = (e: React.FormEvent) => {
+  // Login / Register profile authentication
+  const handleSaveNickname = async (e: React.FormEvent) => {
     e.preventDefault();
+    setErrorMsg(null);
+    setSuccessMsg(null);
+
     const cleanNick = tempNickname.trim();
-    if (!cleanNick) return;
-    setNickname(cleanNick);
-    localStorage.setItem("gameportal_nickname", cleanNick);
+    const cleanPin = tempPin.trim();
+
+    if (!cleanNick || cleanPin.length !== 4 || isNaN(Number(cleanPin))) {
+      setErrorMsg("Debes ingresar un apodo y un PIN numérico de 4 dígitos.");
+      return;
+    }
+
+    try {
+      const res = await fetch("/api/auth/login-register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ nickname: cleanNick, pin: cleanPin }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setNickname(cleanNick);
+        setPin(cleanPin);
+        localStorage.setItem("gameportal_nickname", cleanNick);
+        localStorage.setItem("gameportal_pin", cleanPin);
+        
+        // Trigger toast alerts
+        triggerToast(data.message || "👋 Inicio de sesión exitoso.", "score");
+        
+        // Load user joined clanes
+        fetchUserRooms();
+      } else {
+        setErrorMsg(data.error || "PIN incorrecto o error al acceder");
+      }
+    } catch (err) {
+      setErrorMsg("Fallo al conectar con el servidor de autenticación.");
+    }
   };
 
   const handleLogoutNickname = () => {
     setNickname("");
+    setPin("");
+    setRoomCode("");
+    setUserRooms([]);
     localStorage.removeItem("gameportal_nickname");
+    localStorage.removeItem("gameportal_pin");
+    localStorage.removeItem("gameportal_roomcode");
   };
 
   // Create customized room
@@ -261,6 +324,7 @@ export default function App() {
         localStorage.setItem("gameportal_roomcode", data.room.code);
         setRoomNameInput("");
         setSuccessMsg("¡Sala creada correctamente! Invita a tus amigos.");
+        fetchUserRooms();
       } else {
         setErrorMsg(data.error || "Ocurrió un error al crear la sala");
       }
@@ -294,6 +358,7 @@ export default function App() {
         localStorage.setItem("gameportal_roomcode", data.room.code);
         setJoinCodeInput("");
         setSuccessMsg("👋 ¡Listo! Te has unido correctamente a la sala.");
+        fetchUserRooms();
       } else {
         setErrorMsg(data.error || "Código de sala no válido o expirado");
       }
@@ -384,6 +449,15 @@ export default function App() {
     triggerToast("📋 Código de sala copiado al portapapeles", "score");
   };
 
+  // Switch Room instantly from sidebar
+  const handleSwitchRoom = (code: string) => {
+    const cleanCode = code.toLowerCase().trim();
+    setRoomCode(cleanCode);
+    localStorage.setItem("gameportal_roomcode", cleanCode);
+    setSuccessMsg(null);
+    setErrorMsg(null);
+  };
+
   return (
     <div className="min-h-screen bg-[#070913] bg-[radial-gradient(ellipse_80%_80%_at_50%_-20%,rgba(99,102,241,0.15),rgba(255,255,255,0))] text-slate-200 flex flex-col font-sans selection:bg-indigo-500 selection:text-white pb-10 relative overflow-hidden">
       
@@ -470,7 +544,7 @@ export default function App() {
                 <span className="text-xs font-bold font-mono text-indigo-400">@{nickname}</span>
                 <button
                   onClick={handleLogoutNickname}
-                  className="p-1 hover:text-rose-400 text-slate-500 transition ml-1 cursor-pointer"
+                  className="p-1 hover:text-rose-455 text-slate-500 transition ml-1 cursor-pointer"
                   title="Cambiar Nickname"
                 >
                   <LogOut className="w-3.5 h-3.5" />
@@ -484,16 +558,16 @@ export default function App() {
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 flex flex-col justify-center relative z-10">
         
-        {/* Step 1: Set Profile Nickname */}
+        {/* Step 1: Set Profile Nickname & PIN */}
         {!nickname ? (
           <div className="w-full max-w-md mx-auto my-12 glass-panel p-8 rounded-3xl shadow-2xl relative overflow-hidden border border-slate-800/80 neon-glow-indigo">
             <div className="w-14 h-14 bg-indigo-500/10 rounded-2xl flex items-center justify-center mb-6 border border-indigo-500/30 mx-auto">
               <Users className="w-7 h-7 text-indigo-400" />
             </div>
             
-            <h2 className="text-xl font-bold text-white uppercase tracking-wider font-future mb-2 text-center">Nickname de Jugador</h2>
+            <h2 className="text-xl font-bold text-white uppercase tracking-wider font-future mb-2 text-center">Acceso de Jugador</h2>
             <p className="text-xs text-slate-400 mb-6 leading-relaxed font-sans text-center">
-              Apodo oficial para registrar marcas en los rankings y competir en los minijuegos de amigos.
+              Registra o accede a tu cuenta con un apodo y PIN exclusivo para guardar tus clanes y marcas.
             </p>
 
             <form onSubmit={handleSaveNickname} className="space-y-4">
@@ -508,15 +582,38 @@ export default function App() {
                   placeholder="Ej. didac_pro"
                   value={tempNickname}
                   onChange={(e) => setTempNickname(e.target.value.replace(/\s+/g, ""))}
-                  className="w-full px-4 py-3 bg-slate-955/80 border border-slate-800 rounded-xl text-indigo-400 focus:text-white outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 font-sans tracking-wide transition text-center font-medium"
+                  className="w-full px-4 py-3 bg-slate-955/80 border border-slate-800 rounded-xl text-white outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 font-sans tracking-wide transition text-center font-medium mb-4"
                 />
+
+                <label className="block text-left text-[10px] font-future uppercase tracking-widest text-indigo-400 mb-2">
+                  _PIN DE SEGURIDAD (4 DÍGITOS)
+                </label>
+                <input
+                  type="password"
+                  maxLength={4}
+                  required
+                  placeholder="••••"
+                  value={tempPin}
+                  onChange={(e) => setTempPin(e.target.value.replace(/\D/g, ""))}
+                  className="w-full px-4 py-3 bg-slate-955/80 border border-slate-800 rounded-xl text-white outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 font-sans tracking-widest transition text-center font-medium"
+                />
+                <span className="block text-[9px] text-slate-500 mt-2 font-mono uppercase leading-relaxed text-center">
+                  * Si es un apodo nuevo, este PIN se registrará. Si ya existe, introduce tu PIN original para ingresar.
+                </span>
               </div>
+
+              {errorMsg && (
+                <div className="p-3 bg-red-500/5 border border-red-500/20 rounded-xl text-red-300 font-sans text-xs flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0" />
+                  <span>{errorMsg}</span>
+                </div>
+              )}
 
               <button
                 type="submit"
                 className="w-full py-3 bg-gradient-to-r from-indigo-500 to-violet-650 hover:from-indigo-600 hover:to-violet-750 text-white font-semibold rounded-xl shadow-lg shadow-indigo-500/20 active:scale-[0.98] transition-all flex items-center justify-center gap-2 uppercase text-xs tracking-wider cursor-pointer"
               >
-                <span>Siguiente Paso</span>
+                <span>Acceder al Portal</span>
                 <ChevronRight className="w-4 h-4" />
               </button>
             </form>
@@ -588,7 +685,7 @@ export default function App() {
                     placeholder="Ej. abcde"
                     value={joinCodeInput}
                     onChange={(e) => setJoinCodeInput(e.target.value.toLowerCase().replace(/\s+/g, ""))}
-                    className="w-full px-4 py-3 bg-slate-955/80 border border-slate-800 rounded-xl text-cyan-450 focus:text-white focus:border-cyan-500 outline-none font-sans tracking-widest text-center uppercase transition font-medium"
+                    className="w-full px-4 py-3 bg-slate-955/80 border border-slate-800 rounded-xl text-cyan-400 focus:text-white focus:border-cyan-500 outline-none font-sans tracking-widest text-center uppercase transition font-medium"
                   />
                 </div>
 
@@ -600,6 +697,34 @@ export default function App() {
                 </button>
               </form>
             </div>
+
+            {/* User rooms list if they have already joined some rooms */}
+            {userRooms.length > 0 && (
+              <div className="col-span-1 md:col-span-2 glass-panel p-6 rounded-3xl shadow-lg">
+                <h4 className="text-xs font-bold text-white uppercase tracking-wider font-future mb-3 flex items-center gap-2">
+                  <Users className="w-4 h-4 text-indigo-400" />
+                  Mis Clanes Activos ({userRooms.length})
+                </h4>
+                <p className="text-[11px] text-slate-400 mb-4">
+                  Ya eres miembro de estas salas de juego. Haz clic en cualquiera para ingresar de inmediato.
+                </p>
+                <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-3">
+                  {userRooms.map((r) => (
+                    <button
+                      key={r.code}
+                      onClick={() => handleSwitchRoom(r.code)}
+                      className="p-4 bg-slate-955/40 border border-slate-850 hover:border-slate-750 rounded-2xl text-left transition-all duration-300 cursor-pointer flex justify-between items-center group"
+                    >
+                      <div>
+                        <span className="text-xs font-bold text-white block truncate max-w-[150px]">{r.name}</span>
+                        <span className="text-[9px] font-mono text-indigo-400 mt-1 block uppercase">COD: {r.code}</span>
+                      </div>
+                      <ChevronRight className="w-4 h-4 text-slate-500 group-hover:text-indigo-400 transition-all transform group-hover:translate-x-1" />
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Errors alert container */}
             {(errorMsg || successMsg) && (
@@ -697,7 +822,7 @@ export default function App() {
               </div>
             )}
 
-            {/* Week Selector Bar - Premium horizontal cards styled with generous negative space */}
+            {/* Week Selector Bar */}
             <div className="glass-panel p-5 rounded-2xl shadow-lg">
               <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
                 <div className="flex items-center gap-2.5">
@@ -743,8 +868,42 @@ export default function App() {
             {/* Main Interactive Bento Columns */}
             <div className="grid lg:grid-cols-12 gap-6 items-start">
               
-              {/* Column 1: Active Game & Selector Interface (Left - 6 cols) */}
-              <div className="lg:col-span-6 flex flex-col gap-5">
+              {/* Column 1: Joined Rooms List (Sidebar - 2 cols) */}
+              <div className="lg:col-span-2 glass-panel p-4 shadow-lg h-[540px] flex flex-col rounded-2xl border border-slate-800/80">
+                <div className="flex items-center gap-2 border-b border-slate-800 pb-3 mb-4">
+                  <Users className="w-4 h-4 text-indigo-400" />
+                  <h3 className="text-xs font-bold text-white uppercase tracking-wider font-future">Mis Clanes</h3>
+                </div>
+
+                <div className="flex-1 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
+                  {userRooms.length > 0 ? (
+                    userRooms.map((r) => {
+                      const isCurrent = r.code === roomCode;
+                      return (
+                        <button
+                          key={r.code}
+                          onClick={() => handleSwitchRoom(r.code)}
+                          className={`w-full p-3 border text-left transition-all duration-200 rounded-xl cursor-pointer block ${
+                            isCurrent
+                              ? "bg-indigo-500/10 border-indigo-500/40 text-white font-bold"
+                              : "bg-slate-955/40 border-slate-900 hover:border-slate-800 text-slate-350"
+                          }`}
+                        >
+                          <span className="text-xs block truncate">{r.name}</span>
+                          <span className="text-[8px] font-mono text-indigo-400 mt-1 block uppercase">COD: {r.code}</span>
+                        </button>
+                      );
+                    })
+                  ) : (
+                    <div className="text-center p-4 text-[9px] text-slate-500 uppercase leading-relaxed font-mono">
+                      No estás en ninguna sala. ¡Crea o únete a una!
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Column 2: Active Game (Center-Left - 5 cols) */}
+              <div className="lg:col-span-5 flex flex-col gap-5">
                 
                 {/* Active Daily Game Widget */}
                 {activeGame ? (
@@ -769,7 +928,7 @@ export default function App() {
 
                       {/* Warning if historical week is closed to alert student practice MODE */}
                       {selectedWeek?.isClosed && (
-                        <div className="mt-3 p-3 bg-amber-500/5 border border-amber-500/20 rounded-xl text-amber-300 text-[10px] flex items-center gap-2 font-mono">
+                        <div className="mt-3 p-3 bg-amber-500/5 border border-amber-500/20 rounded-xl text-amber-305 text-[10px] flex items-center gap-2 font-mono">
                           <Lock className="w-4 h-4 text-amber-500 flex-shrink-0" />
                           <span>TABLA CERRADA. ESTÁS JUGANDO EN EL MODO ENTRENAMIENTO/PRÁCTICA.</span>
                         </div>
@@ -789,7 +948,7 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Sub-Widget: List of other available games for training/ranking selection */}
+                {/* Sub-Widget: List of other available games */}
                 <div className="glass-panel p-5 rounded-2xl shadow-lg border border-slate-800/80">
                   <h4 className="text-[10px] font-future uppercase tracking-widest text-cyan-400 mb-3 block">
                     _🕹️ MINIJUEGOS DE ESTA SEMANA (ELIGE PARA JUGAR)
@@ -828,8 +987,8 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Column 2: Leaderboards Table & Scope Switch (Center - 3 cols) */}
-              <div className="lg:col-span-3 glass-panel p-5 shadow-lg h-[540px] flex flex-col rounded-2xl border border-slate-800/80">
+              {/* Column 3: Leaderboards Table & Scope Switch (Center-Right - 2.5 cols -> lg:col-span-2) */}
+              <div className="lg:col-span-2 glass-panel p-4 shadow-lg h-[540px] flex flex-col rounded-2xl border border-slate-800/80">
                 
                 {/* Header classifying tab selects */}
                 <div className="flex items-center justify-between border-b border-slate-800 pb-3 mb-4">
@@ -838,38 +997,38 @@ export default function App() {
                     <h3 className="text-xs font-bold text-white uppercase tracking-wider font-future">Rankings</h3>
                   </div>
                   
-                  {/* Scope filter selector (this Room or Global App) */}
+                  {/* Scope filter selector */}
                   <select
                     value={leaderboardScope}
                     onChange={(e) => setLeaderboardScope(e.target.value as any)}
-                    className="bg-slate-950 text-[10px] text-slate-300 font-semibold py-1 px-2 border border-slate-800 rounded-xl outline-none focus:border-indigo-500 transition-all cursor-pointer uppercase font-sans"
+                    className="bg-slate-950 text-[10px] text-slate-300 font-semibold py-1 px-1 border border-slate-800 rounded-xl outline-none focus:border-indigo-500 transition-all cursor-pointer uppercase font-sans max-w-[80px]"
                   >
-                    <option value="room">Esta Sala 🏠</option>
+                    <option value="room">Sala 🏠</option>
                     <option value="global-all">Global 🌎</option>
                   </select>
                 </div>
 
-                {/* Switcher tabs between Daily (Hoy) or Global All Time (Histórico) */}
+                {/* Switcher tabs */}
                 <div className="grid grid-cols-2 gap-1 bg-slate-950/80 p-1 border border-slate-800 rounded-xl mb-4 font-sans">
                   <button
                     onClick={() => setLeaderboardTab("daily")}
-                    className={`py-1.5 px-2 text-[10px] uppercase font-black transition-all rounded-lg cursor-pointer ${
+                    className={`py-1.5 px-1 text-[9px] uppercase font-black transition-all rounded-lg cursor-pointer truncate ${
                       leaderboardTab === "daily"
-                        ? "bg-slate-850 text-white shadow-sm"
+                        ? "bg-slate-855 text-white shadow-sm"
                         : "text-slate-400 hover:text-white"
                     }`}
                   >
-                    Est. Semana
+                    Semana
                   </button>
                   <button
                     onClick={() => setLeaderboardTab("global")}
-                    className={`py-1.5 px-2 text-[10px] uppercase font-black transition-all rounded-lg cursor-pointer ${
+                    className={`py-1.5 px-1 text-[9px] uppercase font-black transition-all rounded-lg cursor-pointer truncate ${
                       leaderboardTab === "global"
-                        ? "bg-slate-850 text-white shadow-sm"
+                        ? "bg-slate-855 text-white shadow-sm"
                         : "text-slate-400 hover:text-white"
                     }`}
                   >
-                    Hist. Total
+                    Histórico
                   </button>
                 </div>
 
@@ -886,12 +1045,12 @@ export default function App() {
                           className={`p-2 border transition-all duration-200 flex items-center justify-between rounded-xl ${
                             isMe 
                               ? "bg-indigo-500/10 border-indigo-500/30 font-bold" 
-                              : "bg-slate-955/40 border-slate-900 hover:border-slate-800"
+                              : "bg-slate-955/40 border-slate-900 hover:border-slate-805"
                           }`}
                         >
-                          <div className="flex items-center gap-2 ml-1">
+                          <div className="flex items-center gap-1.5 ml-0.5">
                             {/* Rank Badge */}
-                            <div className={`w-5 h-5 flex items-center justify-center font-mono text-[9px] font-black rounded-lg ${
+                            <div className={`w-4 h-4 flex items-center justify-center font-mono text-[8px] font-black rounded-lg ${
                               index === 0 ? "bg-amber-500/20 text-amber-300 border border-amber-500/40 font-semibold" :
                               index === 1 ? "bg-slate-300/20 text-slate-300 border border-slate-300/40" :
                               index === 2 ? "bg-amber-700/20 text-amber-600 border border-amber-700/40" : "bg-slate-900 text-slate-400 border border-slate-800"
@@ -899,20 +1058,20 @@ export default function App() {
                               {index + 1}
                             </div>
                             <div>
-                              <span className="text-xs text-slate-200 block truncate max-w-[90px]">
+                              <span className="text-[10px] text-slate-205 block truncate max-w-[65px]">
                                 {isMe ? `@${record.player}` : `@${record.player}`}
                               </span>
-                              <span className="block text-[8px] font-mono text-gray-500 mt-0.5">
+                              <span className="block text-[7px] font-mono text-gray-500 mt-0.5">
                                 {new Date(record.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                               </span>
                             </div>
                           </div>
 
                           <div className="text-right">
-                            <span className="font-mono text-xs font-bold text-amber-500">
+                            <span className="font-mono text-[10px] font-bold text-amber-505">
                               {record.score}
                             </span>
-                            <span className="block text-[7px] tracking-wider text-slate-500 uppercase">
+                            <span className="block text-[6px] tracking-wider text-slate-500 uppercase">
                               pts
                             </span>
                           </div>
@@ -920,22 +1079,22 @@ export default function App() {
                       );
                     })
                   ) : (
-                    <div className="flex flex-col items-center justify-center text-center p-6 h-full font-sans">
-                      <Trophy className="w-6 h-6 text-slate-800 mb-2" />
-                      <p className="text-[10px] text-slate-500 uppercase">Sin marcas registradas en esta sección.</p>
+                    <div className="flex flex-col items-center justify-center text-center p-4 h-full font-sans">
+                      <Trophy className="w-5 h-5 text-slate-805 mb-2" />
+                      <p className="text-[9px] text-slate-500 uppercase">Sin marcas.</p>
                     </div>
                   )}
                 </div>
 
-                <div className="mt-4 pt-3 border-t border-slate-800/80 text-center text-[9px] font-mono text-gray-500 uppercase tracking-wider leading-normal">
-                  PUNTAJES FILTRADOS POR EL JUEGO SELECCIONADO.
+                <div className="mt-4 pt-3 border-t border-slate-800/80 text-center text-[8px] font-mono text-gray-500 uppercase tracking-wider leading-normal">
+                  MARCAS DEL JUEGO.
                 </div>
               </div>
 
-              {/* Column 3: Integrated Live Chat & Notification Feed (Right - 3 cols) */}
+              {/* Column 4: Integrated Live Chat & Notification Feed (Right - 3 cols) */}
               <div className="lg:col-span-3 glass-panel h-[540px] flex flex-col shadow-lg overflow-hidden rounded-2xl border border-slate-800/80">
                 
-                {/* Chat Top Banner with toggle active view tabs */}
+                {/* Chat Top Banner */}
                 <div className="flex items-center justify-between bg-slate-950/60 p-3.5 border-b border-slate-800 font-sans">
                   <div className="flex items-center gap-2">
                     <MessageSquare className="w-4 h-4 text-indigo-400" />
@@ -975,7 +1134,7 @@ export default function App() {
                           <div
                             className={`p-2.5 border text-[11px] leading-relaxed break-words ${
                               isMe
-                                ? "bg-indigo-650/15 border-indigo-500/25 text-white rounded-2xl rounded-tr-none"
+                                ? "bg-indigo-655/15 border-indigo-500/25 text-white rounded-2xl rounded-tr-none"
                                 : "bg-slate-950/60 border-slate-850 text-slate-300 rounded-2xl rounded-tl-none"
                             }`}
                           >
@@ -1027,7 +1186,7 @@ export default function App() {
           <p className="text-[10px] text-gray-500 uppercase tracking-wider">
             &copy; 1989-2026 Portal Arcade Clan. Todos los derechos reservados.
           </p>
-          <div className="flex items-center justify-center gap-1.5 mt-2 bg-slate-950/40 border border-slate-850/60 text-slate-500 text-[8px] tracking-wider uppercase px-3 py-1 rounded-full w-fit mx-auto select-none">
+          <div className="flex items-center justify-center gap-1.5 mt-2 bg-slate-950/40 border border-slate-850/60 text-slate-550 text-[8px] tracking-wider uppercase px-3 py-1 rounded-full w-fit mx-auto select-none">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
             <span>Estableciendo conexión persistente con nodo SupaDB</span>
           </div>
