@@ -140,12 +140,12 @@ function getCurrentWeekId(): string {
 }
 
 // Supabase Client Initialization
-const supabaseUrl = process.env.SUPABASE_URL || "";
-const supabaseKey = process.env.SUPABASE_KEY || "";
+const supabaseUrl = process.env.SUPABASE_URL || "https://placeholder-project.supabase.co";
+const supabaseKey = process.env.SUPABASE_KEY || "placeholder-key";
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-if (!supabaseUrl || !supabaseKey) {
-  console.warn("⚠️ [Supabase Warning] SUPABASE_URL o SUPABASE_KEY no están configuradas en el entorno.");
+if (!process.env.SUPABASE_URL || !process.env.SUPABASE_KEY) {
+  console.warn("⚠️ [Supabase Warning] SUPABASE_URL o SUPABASE_KEY no están configuradas en el entorno. Se usan placeholders.");
 }
 
 // Database wrapper implementing Supabase interactions
@@ -211,10 +211,12 @@ class SupaDB {
         `)
         .eq("nickname", cleanNick);
 
-      if (error || !data) {
-        console.error("❌ Supabase Error fetching user rooms:", error?.message);
-        return [];
+      if (error) {
+        console.error("❌ Supabase Error fetching user rooms:", error.message);
+        throw new Error(`Supabase select failed: ${error.message}`);
       }
+
+      if (!data) return [];
 
       // Map joint rooms response
       return data
@@ -222,7 +224,7 @@ class SupaDB {
         .filter((room: any) => room !== null);
     } catch (e) {
       console.error("❌ Fallo al obtener las salas del usuario", e);
-      return [];
+      throw e;
     }
   }
 
@@ -278,6 +280,7 @@ class SupaDB {
       if (error) {
         if (error.code !== "PGRST116") { // PGRST116 is normal "no rows found"
           console.error("❌ Supabase: Error fetching room:", error.message, error.details);
+          throw new Error(`Supabase select failed: ${error.message}`);
         }
         return null;
       }
@@ -294,7 +297,7 @@ class SupaDB {
       };
     } catch (e) {
       console.error("❌ Error al obtener sala", e);
-      return null;
+      throw e;
     }
   }
 
@@ -387,9 +390,11 @@ class SupaDB {
       
       if (memberError) {
         console.error("❌ Supabase Error inserting room member (join):", memberError.message, memberError.details);
+        throw new Error(`Supabase insert member failed: ${memberError.message}`);
       }
     } catch (e) {
       console.error("❌ Fallo al registrar miembro de sala en Supabase", e);
+      throw e;
     }
 
     const userExists = room.players.some(
@@ -429,9 +434,11 @@ class SupaDB {
         
         if (error) {
           console.error("❌ Supabase Error updating room (join):", error.message, error.details);
+          throw new Error(`Supabase update failed: ${error.message}`);
         }
       } catch (e) {
         console.error("❌ Fallo al actualizar sala unida en Supabase", e);
+        throw e;
       }
     }
 
@@ -463,11 +470,11 @@ class SupaDB {
       
       if (error) {
         console.error("❌ Supabase Error updating messages:", error.message, error.details);
-        return null;
+        throw new Error(`Supabase update failed: ${error.message}`);
       }
     } catch (e) {
       console.error("❌ Fallo al añadir mensaje en Supabase", e);
-      return null;
+      throw e;
     }
 
     return newMessage;
@@ -725,72 +732,96 @@ app.post("/api/admin/set-game", async (req, res) => {
 });
 
 app.post("/api/auth/login-register", async (req, res) => {
-  const { nickname, pin } = req.body;
-  if (!nickname || !pin) {
-     res.status(400).json({ error: "Faltan parámetros: nickname o pin" });
-     return;
-  }
-  const result = await supaDB.loginOrRegister(nickname, pin);
-  if (result.success) {
-    res.json(result);
-  } else {
-    res.status(401).json({ error: result.message });
+  try {
+    const { nickname, pin } = req.body;
+    if (!nickname || !pin) {
+       res.status(400).json({ error: "Faltan parámetros: nickname o pin" });
+       return;
+    }
+    const result = await supaDB.loginOrRegister(nickname, pin);
+    if (result.success) {
+      res.json(result);
+    } else {
+      res.status(401).json({ error: result.message });
+    }
+  } catch (err: any) {
+    res.status(550).json({ error: `Fallo al iniciar sesión / registrar: ${err.message}` });
   }
 });
 
 app.get("/api/users/:nickname/rooms", async (req, res) => {
-  const { nickname } = req.params;
-  const rooms = await supaDB.getUserRooms(nickname);
-  res.json({ rooms });
+  try {
+    const { nickname } = req.params;
+    const rooms = await supaDB.getUserRooms(nickname);
+    res.json({ rooms });
+  } catch (err: any) {
+    res.status(500).json({ error: `Fallo al obtener tus salas: ${err.message}` });
+  }
 });
 
 app.post("/api/rooms/create", async (req, res) => {
-  const { name, creator } = req.body;
-  if (!name || !creator) {
-    res.status(400).json({ error: "Falta el nombre de la sala o del creador" });
-    return;
+  try {
+    const { name, creator } = req.body;
+    if (!name || !creator) {
+      res.status(400).json({ error: "Falta el nombre de la sala o del creador" });
+      return;
+    }
+    const room = await supaDB.createRoom(name, creator);
+    res.json({ room });
+  } catch (err: any) {
+    res.status(500).json({ error: `Fallo al crear la sala en base de datos: ${err.message}` });
   }
-  const room = await supaDB.createRoom(name, creator);
-  res.json({ room });
 });
 
 app.post("/api/rooms/join", async (req, res) => {
-  const { code, nickname } = req.body;
-  if (!code || !nickname) {
-    res.status(400).json({ error: "Falta el código de sala o tu nombre de usuario" });
-    return;
+  try {
+    const { code, nickname } = req.body;
+    if (!code || !nickname) {
+      res.status(400).json({ error: "Falta el código de sala o tu nombre de usuario" });
+      return;
+    }
+    const room = await supaDB.joinRoom(code, nickname);
+    if (!room) {
+      res.status(404).json({ error: "Sala no encontrada o inactiva" });
+      return;
+    }
+    res.json({ room });
+  } catch (err: any) {
+    res.status(500).json({ error: `Fallo al unirse a la sala: ${err.message}` });
   }
-  const room = await supaDB.joinRoom(code, nickname);
-  if (!room) {
-    res.status(404).json({ error: "Sala no encontrada o inactiva" });
-    return;
-  }
-  res.json({ room });
 });
 
 app.get("/api/rooms/:code", async (req, res) => {
-  const { code } = req.params;
-  const room = await supaDB.getRoom(code);
-  if (!room) {
-    res.status(404).json({ error: "Sala no encontrada" });
-    return;
+  try {
+    const { code } = req.params;
+    const room = await supaDB.getRoom(code);
+    if (!room) {
+      res.status(404).json({ error: "Sala no encontrada" });
+      return;
+    }
+    res.json({ room });
+  } catch (err: any) {
+    res.status(500).json({ error: `Fallo al consultar la sala: ${err.message}` });
   }
-  res.json({ room });
 });
 
 app.post("/api/rooms/:code/chat", async (req, res) => {
-  const { code } = req.params;
-  const { sender, text } = req.body;
-  if (!sender || !text) {
-    res.status(400).json({ error: "Falta remitente o texto del mensaje" });
-    return;
+  try {
+    const { code } = req.params;
+    const { sender, text } = req.body;
+    if (!sender || !text) {
+      res.status(400).json({ error: "Falta remitente o texto del mensaje" });
+      return;
+    }
+    const msg = await supaDB.addMessage(code, sender, text);
+    if (!msg) {
+      res.status(404).json({ error: "Sala no encontrada" });
+      return;
+    }
+    res.json({ message: msg });
+  } catch (err: any) {
+    res.status(500).json({ error: `Fallo al enviar mensaje: ${err.message}` });
   }
-  const msg = await supaDB.addMessage(code, sender, text);
-  if (!msg) {
-    res.status(404).json({ error: "Sala no encontrada" });
-    return;
-  }
-  res.json({ message: msg });
 });
 
 app.get("/api/weeks", (req, res) => {
@@ -807,46 +838,54 @@ app.get("/api/weeks", (req, res) => {
 });
 
 app.post("/api/rooms/:code/score", async (req, res) => {
-  const { code } = req.params;
-  const { player, score, gameId, weekId } = req.body;
-  if (!player || score === undefined || !gameId) {
-    res.status(400).json({ error: "Faltan parámetros del puntaje" });
-    return;
-  }
-  
-  const targetWeekId = weekId || getCurrentWeekId();
-  const todayStr = new Date().toISOString().split("T")[0];
-  const targetWeek = WEEKS_DATA.find(w => w.id === targetWeekId);
-  
-  if (targetWeek && todayStr > targetWeek.endDate) {
-    res.status(400).json({ error: "La clasificación de esta semana ya ha finalizado. Puedes seguir practicando, pero el podio oficial competitiva está cerrado." });
-    return;
-  }
+  try {
+    const { code } = req.params;
+    const { player, score, gameId, weekId } = req.body;
+    if (!player || score === undefined || !gameId) {
+      res.status(400).json({ error: "Faltan parámetros del puntaje" });
+      return;
+    }
+    
+    const targetWeekId = weekId || getCurrentWeekId();
+    const todayStr = new Date().toISOString().split("T")[0];
+    const targetWeek = WEEKS_DATA.find(w => w.id === targetWeekId);
+    
+    if (targetWeek && todayStr > targetWeek.endDate) {
+      res.status(400).json({ error: "La clasificación de esta semana ya ha finalizado. Puedes seguir practicando, pero el podio oficial competitiva está cerrado." });
+      return;
+    }
 
-  // Check if room exists
-  const room = await supaDB.getRoom(code);
-  if (!room) {
-    res.status(404).json({ error: "Sala no encontrada" });
-    return;
-  }
+    // Check if room exists
+    const room = await supaDB.getRoom(code);
+    if (!room) {
+      res.status(404).json({ error: "Sala no encontrada" });
+      return;
+    }
 
-  const record = await supaDB.submitScore(player, score, gameId, code, targetWeekId);
-  res.json({ success: true, score: record });
+    const record = await supaDB.submitScore(player, score, gameId, code, targetWeekId);
+    res.json({ success: true, score: record });
+  } catch (err: any) {
+    res.status(500).json({ error: `Fallo al registrar puntaje: ${err.message}` });
+  }
 });
 
 // Global / local Leaderboards
 app.get("/api/leaderboards", async (req, res) => {
-  const gameId = req.query.gameId as string || "clicker_veloz";
-  const roomId = req.query.roomId as string || undefined;
-  const weekId = req.query.weekId as string || getCurrentWeekId();
+  try {
+    const gameId = req.query.gameId as string || "clicker_veloz";
+    const roomId = req.query.roomId as string || undefined;
+    const weekId = req.query.weekId as string || getCurrentWeekId();
 
-  const daily = await supaDB.getWeeklyLeaderboard(gameId, roomId, weekId);
-  const globalList = await supaDB.getGlobalLeaderboard(gameId, roomId);
+    const daily = await supaDB.getWeeklyLeaderboard(gameId, roomId, weekId);
+    const globalList = await supaDB.getGlobalLeaderboard(gameId, roomId);
 
-  res.json({
-    daily,
-    global: globalList
-  });
+    res.json({
+      daily,
+      global: globalList
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: `Fallo al obtener clasificaciones: ${err.message}` });
+  }
 });
 
 // Vite Integration & Listener Setup
