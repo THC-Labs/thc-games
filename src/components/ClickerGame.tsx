@@ -14,7 +14,13 @@ export default function ClickerGame({ onFinish, instructions }: ClickerGameProps
   const [targetPos, setTargetPos] = useState({ x: 50, y: 50 }); // percentages
   const [countdown, setCountdown] = useState(3);
   const [starting, setStarting] = useState(false);
+  const [targetSpawnId, setTargetSpawnId] = useState(0);
   const playAreaRef = useRef<HTMLDivElement>(null);
+
+  const scoreRef = useRef(score);
+  useEffect(() => {
+    scoreRef.current = score;
+  }, [score]);
 
   // Play synthesized game sounds
   const playSound = (freq: number, type: OscillatorType, duration: number) => {
@@ -38,6 +44,21 @@ export default function ClickerGame({ onFinish, instructions }: ClickerGameProps
     }
   };
 
+  const moveTarget = (currentScore?: number) => {
+    const activeScore = currentScore !== undefined ? currentScore : scoreRef.current;
+    // Generate random positions between 10% and 90%
+    const newX = Math.floor(Math.random() * 80) + 10;
+    const newY = Math.floor(Math.random() * 80) + 10;
+    setTargetPos({ x: newX, y: newY });
+    
+    // Make target smaller as score increases to make it harder
+    const nextSize = Math.max(25, 80 - Math.floor(activeScore / 4) * 5);
+    setTargetSize(nextSize);
+
+    // Reset auto-relocation timer by changing the key
+    setTargetSpawnId((prev) => prev + 1);
+  };
+
   // Pre-game countdown
   useEffect(() => {
     let timer: any;
@@ -52,12 +73,12 @@ export default function ClickerGame({ onFinish, instructions }: ClickerGameProps
       setIsPlaying(true);
       setTimeLeft(15);
       setScore(0);
-      moveTarget();
+      moveTarget(0);
     }
     return () => clearTimeout(timer);
   }, [starting, countdown]);
 
-  // Main game timer
+  // Main game timer - score removed from dependencies to prevent reset
   useEffect(() => {
     let timer: any;
     if (isPlaying && timeLeft > 0) {
@@ -70,26 +91,29 @@ export default function ClickerGame({ onFinish, instructions }: ClickerGameProps
     } else if (isPlaying && timeLeft === 0) {
       setIsPlaying(false);
       playSound(523.25, "square", 0.4); // game over fanfare
-      onFinish(score);
+      onFinish(scoreRef.current);
     }
     return () => clearTimeout(timer);
-  }, [isPlaying, timeLeft, score]);
+  }, [isPlaying, timeLeft]);
+
+  // Auto relocate target if not clicked in time
+  useEffect(() => {
+    if (!isPlaying) return;
+
+    // Relocates faster and faster as score increases
+    const timeoutDuration = Math.max(300, 1200 - Math.floor(score / 30) * 75);
+
+    const timer = setTimeout(() => {
+      moveTarget();
+    }, timeoutDuration);
+
+    return () => clearTimeout(timer);
+  }, [isPlaying, targetSpawnId, score]);
 
   const startGame = () => {
     setCountdown(3);
     setStarting(true);
     setScore(0);
-  };
-
-  const moveTarget = () => {
-    // Generate random positions between 10% and 90%
-    const newX = Math.floor(Math.random() * 80) + 10;
-    const newY = Math.floor(Math.random() * 80) + 10;
-    setTargetPos({ x: newX, y: newY });
-    
-    // Make target smaller as score increases to make it harder
-    const nextSize = Math.max(25, 80 - Math.floor(score / 4) * 5);
-    setTargetSize(nextSize);
   };
 
   const handleTargetClick = (e: React.MouseEvent) => {
@@ -98,12 +122,13 @@ export default function ClickerGame({ onFinish, instructions }: ClickerGameProps
 
     // Award score based on target size! Smaller = more points
     const pointsAwarded = Math.ceil((100 - targetSize) / 5) * 5 + 10; // minimum 10 points, smaller gives more
-    setScore((prev) => prev + pointsAwarded);
+    const newScore = score + pointsAwarded;
+    setScore(newScore);
     
     // play pop sound
     playSound(600 + pointsAwarded * 3, "sine", 0.12);
     
-    moveTarget();
+    moveTarget(newScore);
   };
 
   const handlePlayAreaMissClick = () => {
