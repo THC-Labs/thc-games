@@ -140,12 +140,20 @@ function getCurrentWeekId(): string {
 }
 
 // Supabase Client Initialization
-const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "https://placeholder-project.supabase.co";
-const supabaseKey = process.env.SUPABASE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || "placeholder-key";
+let supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+if (!supabaseUrl || supabaseUrl === "undefined" || supabaseUrl === "null" || (!supabaseUrl.startsWith("http://") && !supabaseUrl.startsWith("https://"))) {
+  supabaseUrl = "https://placeholder-project.supabase.co";
+}
+
+let supabaseKey = process.env.SUPABASE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || "";
+if (!supabaseKey || supabaseKey === "undefined" || supabaseKey === "null") {
+  supabaseKey = "placeholder-key";
+}
+
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-if ((!process.env.SUPABASE_URL && !process.env.NEXT_PUBLIC_SUPABASE_URL) || (!process.env.SUPABASE_KEY && !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY)) {
-  console.warn("⚠️ [Supabase Warning] Ni SUPABASE_URL/SUPABASE_KEY ni NEXT_PUBLIC_SUPABASE_URL/NEXT_PUBLIC_SUPABASE_ANON_KEY están configuradas en el entorno. Se usan placeholders.");
+if (supabaseUrl === "https://placeholder-project.supabase.co" || supabaseKey === "placeholder-key") {
+  console.warn("⚠️ [Supabase Warning] Usando credenciales placeholder de Supabase porque no se encontraron variables válidas.");
 }
 
 // Database wrapper implementing Supabase interactions
