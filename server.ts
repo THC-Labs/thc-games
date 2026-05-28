@@ -1,7 +1,10 @@
+import dotenv from "dotenv";
+dotenv.config();
+
 import express from "express";
 import path from "path";
 import fs from "fs";
-import { createServer as createViteServer } from "vite";
+import { createClient } from "@supabase/supabase-js";
 
 // Interfaces for our custom data model
 interface Player {
@@ -136,95 +139,101 @@ function getCurrentWeekId(): string {
   return active ? active.id : "2026-W22"; // Default to systems current week
 }
 
-const DB_FILE = path.join(process.cwd(), "supadb.json");
+// Supabase Client Initialization
+const supabaseUrl = process.env.SUPABASE_URL || "";
+const supabaseKey = process.env.SUPABASE_KEY || "";
+const supabase = createClient(supabaseUrl, supabaseKey);
 
-// Local DB State that acts as "SupaDB"
+if (!supabaseUrl || !supabaseKey) {
+  console.warn("⚠️ [Supabase Warning] SUPABASE_URL o SUPABASE_KEY no están configuradas en el entorno.");
+}
+
+// Database wrapper implementing Supabase interactions
 class SupaDB {
-  private data: {
-    rooms: Record<string, Room>;
-    scores: ScoreRecord[];
-    currentDailyGameId: string;
-    lastGameUpdateDate: string;
-  } = {
-    rooms: {},
-    scores: [],
-    currentDailyGameId: "clicker_veloz",
-    lastGameUpdateDate: ""
-  };
-
-  constructor() {
-    this.load();
-    this.updateDailyGameAutomatically();
-  }
-
-  private load() {
+  
+  // Get current game of the day (checks settings override first, else deterministically hashes the date)
+  public async getDailyGame(): Promise<Game> {
     try {
-      if (fs.existsSync(DB_FILE)) {
-        const fileContent = fs.readFileSync(DB_FILE, "utf-8");
-        this.data = JSON.parse(fileContent);
-        console.log("💾 SupaDB: Datos cargados exitosamente desde", DB_FILE);
-      } else {
-        this.save();
+      const { data, error } = await supabase
+        .from("app_settings")
+        .select("value")
+        .eq("key", "daily_game_override")
+        .single();
+      
+      if (data && data.value) {
+        const game = GAMES.find(g => g.id === data.value);
+        if (game) return game;
       }
     } catch (e) {
-      console.error("❌ Fallo al cargar SupaDB, inicializando datos vacíos", e);
+      // Fallback
     }
-  }
 
-  public save() {
-    try {
-      fs.writeFileSync(DB_FILE, JSON.stringify(this.data, null, 2), "utf-8");
-    } catch (e) {
-      console.error("❌ Fallo al escribir en SupaDB", e);
-    }
-  }
-
-  // Auto update game of the day based on the calendar day to make it dynamic
-  public updateDailyGameAutomatically() {
     const todayStr = new Date().toISOString().split("T")[0];
-    if (this.data.lastGameUpdateDate !== todayStr) {
-      // Pick a semi-random game based on date hash
-      const hash = todayStr.split("").reduce((acc, char) => acc + char.charCodeAt(0), 0);
-      const gameIndex = hash % GAMES.length;
-      this.data.currentDailyGameId = GAMES[gameIndex].id;
-      this.data.lastGameUpdateDate = todayStr;
-      this.save();
-      console.log(`📅 SupaDB: Juego del día actualizado para hoy (${todayStr}): ${this.data.currentDailyGameId}`);
-    }
+    const hash = todayStr.split("").reduce((acc, char) => acc + char.charCodeAt(0), 0);
+    const gameIndex = hash % GAMES.length;
+    return GAMES[gameIndex];
   }
 
-  // Get current game of the day
-  public getDailyGame(): Game {
-    this.updateDailyGameAutomatically();
-    const game = GAMES.find(g => g.id === this.data.currentDailyGameId);
-    return game || GAMES[0];
-  }
-
-  public setDailyGame(gameId: string): boolean {
+  public async setDailyGame(gameId: string): Promise<boolean> {
     const exists = GAMES.some(g => g.id === gameId);
-    if (exists) {
-      this.data.currentDailyGameId = gameId;
-      this.save();
-      return true;
+    if (!exists) return false;
+
+    try {
+      const { error } = await supabase
+        .from("app_settings")
+        .upsert({ key: "daily_game_override", value: gameId });
+      
+      return !error;
+    } catch (e) {
+      console.error("❌ Falló al forzar el juego del día en Supabase", e);
+      return false;
     }
-    return false;
   }
 
-  // Rooms logic
-  public getRoom(code: string): Room | null {
-    return this.data.rooms[code.toLowerCase()] || null;
+  // Fetch a single room from Supabase
+  public async getRoom(code: string): Promise<Room | null> {
+    try {
+      const cleanCode = code.toLowerCase().trim();
+      const { data, error } = await supabase
+        .from("rooms")
+        .select("*")
+        .eq("code", cleanCode)
+        .single();
+
+      if (error || !data) return null;
+      
+      return {
+        code: data.code,
+        name: data.name,
+        creator: data.creator,
+        players: typeof data.players === "string" ? JSON.parse(data.players) : data.players || [],
+        messages: typeof data.messages === "string" ? JSON.parse(data.messages) : data.messages || [],
+        notifications: typeof data.notifications === "string" ? JSON.parse(data.notifications) : data.notifications || [],
+        createdAt: data.created_at || data.createdAt
+      };
+    } catch (e) {
+      console.error("❌ Error al obtener sala", e);
+      return null;
+    }
   }
 
-  public createRoom(name: string, creator: string): Room {
-    // Generate a unique room code of 5 alphanumeric digits
-    let code = "";
+  // Create a new room with a unique 5-char code
+  public async createRoom(name: string, creator: string): Promise<Room> {
     const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
-    do {
+    let code = "";
+    let isUnique = false;
+
+    while (!isUnique) {
       code = "";
       for (let i = 0; i < 5; i++) {
         code += chars.charAt(Math.floor(Math.random() * chars.length));
       }
-    } while (this.data.rooms[code]);
+
+      const existingRoom = await this.getRoom(code);
+      if (!existingRoom) {
+        isUnique = true;
+      }
+    }
 
     const newRoom: Room = {
       code: code,
@@ -235,7 +244,7 @@ class SupaDB {
         {
           id: `welcome-${Date.now()}`,
           sender: "Sistema Bot",
-          text: `¡Bienvenidos a la sala ${name}! Creador por ${creator}. El juego del día está listo para jugar.`,
+          text: `¡Bienvenidos a la sala ${name}! Creada por ${creator}. El juego del día está listo para jugar.`,
           timestamp: new Date().toISOString()
         }
       ],
@@ -250,17 +259,30 @@ class SupaDB {
       createdAt: new Date().toISOString()
     };
 
-    this.data.rooms[code] = newRoom;
-    this.save();
+    try {
+      await supabase
+        .from("rooms")
+        .insert({
+          code,
+          name,
+          creator,
+          players: newRoom.players,
+          messages: newRoom.messages,
+          notifications: newRoom.notifications,
+          created_at: newRoom.createdAt
+        });
+    } catch (e) {
+      console.error("❌ Fallo al insertar sala en Supabase", e);
+    }
+
     return newRoom;
   }
 
-  public joinRoom(code: string, nickname: string): Room | null {
-    const cleanCode = code.toLowerCase().trim();
-    const room = this.data.rooms[cleanCode];
+  // Join an existing room
+  public async joinRoom(code: string, nickname: string): Promise<Room | null> {
+    const room = await this.getRoom(code);
     if (!room) return null;
 
-    // Check if user already in players
     const userExists = room.players.some(
       p => p.nickname.toLowerCase() === nickname.toLowerCase()
     );
@@ -271,7 +293,6 @@ class SupaDB {
         joinedAt: new Date().toISOString()
       });
 
-      // System notification
       const timestamp = new Date().toISOString();
       room.notifications.push({
         id: `notif-${Date.now()}-${Math.random()}`,
@@ -287,14 +308,26 @@ class SupaDB {
         timestamp
       });
 
-      this.save();
+      try {
+        await supabase
+          .from("rooms")
+          .update({
+            players: room.players,
+            messages: room.messages,
+            notifications: room.notifications
+          })
+          .eq("code", room.code);
+      } catch (e) {
+        console.error("❌ Fallo al actualizar sala unida en Supabase", e);
+      }
     }
 
     return room;
   }
 
-  public addMessage(code: string, sender: string, text: string): Message | null {
-    const room = this.getRoom(code);
+  // Append a chat message to a room
+  public async addMessage(code: string, sender: string, text: string): Promise<Message | null> {
+    const room = await this.getRoom(code);
     if (!room) return null;
 
     const newMessage: Message = {
@@ -305,279 +338,368 @@ class SupaDB {
     };
 
     room.messages.push(newMessage);
-    
-    // limit messages to last 100 to save space
     if (room.messages.length > 100) {
       room.messages.shift();
     }
 
-    this.save();
+    try {
+      await supabase
+        .from("rooms")
+        .update({ messages: room.messages })
+        .eq("code", room.code);
+    } catch (e) {
+      console.error("❌ Fallo al añadir mensaje en Supabase", e);
+      return null;
+    }
+
     return newMessage;
   }
 
-  // Scores logic
-  public submitScore(
+  // Submit score record and push room notification
+  public async submitScore(
     player: string,
     score: number,
     gameId: string,
     roomId: string,
     weekId?: string
-  ): ScoreRecord {
+  ): Promise<ScoreRecord> {
     const finalWeekId = weekId || getCurrentWeekId();
-    const date = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
+    const date = new Date().toISOString().split("T")[0];
     const timestamp = new Date().toISOString();
+    const cleanRoomId = roomId.toLowerCase().trim();
 
-    const newRecord: ScoreRecord = {
-      id: `score-${Date.now()}-${Math.random()}`,
-      player,
-      score,
-      gameId,
-      roomId: roomId.toLowerCase().trim(),
-      date,
-      timestamp,
-      weekId: finalWeekId
-    };
+    let finalRecord: ScoreRecord;
 
-    // Check if player has an existing score for this game in this room and this week ID
-    // If they score higher, update it! Otherwise keep the higher one.
-    const existingIndex = this.data.scores.findIndex(
-      s => s.player.toLowerCase() === player.toLowerCase() &&
-           s.gameId === gameId &&
-           s.roomId === roomId.toLowerCase().trim() &&
-           (s.weekId === finalWeekId || (!s.weekId && finalWeekId === "2026-W22"))
-    );
+    try {
+      // Check if there is an existing record
+      const { data: existing, error } = await supabase
+        .from("scores")
+        .select("*")
+        .eq("player", player)
+        .eq("game_id", gameId)
+        .eq("room_id", cleanRoomId)
+        .eq("week_id", finalWeekId)
+        .maybeSingle();
 
-    if (existingIndex !== -1) {
-      if (score > this.data.scores[existingIndex].score) {
-        this.data.scores[existingIndex].score = score;
-        this.data.scores[existingIndex].timestamp = timestamp;
-        this.data.scores[existingIndex].date = date;
+      if (existing) {
+        if (score > existing.score) {
+          await supabase
+            .from("scores")
+            .update({
+              score,
+              timestamp,
+              date
+            })
+            .eq("id", existing.id);
+
+          finalRecord = {
+            id: existing.id,
+            player,
+            score,
+            gameId,
+            roomId: cleanRoomId,
+            date,
+            timestamp,
+            weekId: finalWeekId
+          };
+        } else {
+          finalRecord = {
+            id: existing.id,
+            player: existing.player,
+            score: existing.score,
+            gameId: existing.game_id,
+            roomId: existing.room_id,
+            date: existing.date,
+            timestamp: existing.timestamp,
+            weekId: existing.week_id
+          };
+        }
+      } else {
+        const id = `score-${Date.now()}-${Math.random()}`;
+        await supabase
+          .from("scores")
+          .insert({
+            id,
+            player,
+            score,
+            game_id: gameId,
+            room_id: cleanRoomId,
+            date,
+            timestamp,
+            week_id: finalWeekId
+          });
+
+        finalRecord = {
+          id,
+          player,
+          score,
+          gameId,
+          roomId: cleanRoomId,
+          date,
+          timestamp,
+          weekId: finalWeekId
+        };
       }
-    } else {
-      this.data.scores.push(newRecord);
+
+      // Add visual score notification to room
+      const room = await this.getRoom(roomId);
+      if (room) {
+        const gName = GAMES.find(g => g.id === gameId)?.name || gameId;
+        room.notifications.push({
+          id: `notif-score-${Date.now()}`,
+          type: "score",
+          message: `🏆 ¡${player} consiguió un puntaje de ${score} en ${gName}!`,
+          timestamp
+        });
+
+        await supabase
+          .from("rooms")
+          .update({ notifications: room.notifications })
+          .eq("code", room.code);
+      }
+    } catch (e) {
+      console.error("❌ Fallo al subir puntaje en Supabase", e);
+      // Fallback response
+      finalRecord = {
+        id: `err-${Date.now()}`,
+        player,
+        score,
+        gameId,
+        roomId: cleanRoomId,
+        date,
+        timestamp,
+        weekId: finalWeekId
+      };
     }
 
-    // Add score notification to the room if submitted to a room
-    const room = this.getRoom(roomId);
-    if (room) {
-      const gName = GAMES.find(g => g.id === gameId)?.name || gameId;
-      room.notifications.push({
-        id: `notif-score-${Date.now()}`,
-        type: "score",
-        message: `🏆 ¡${player} consiguió un puntaje de ${score} en ${gName}!`,
-        timestamp
+    return finalRecord;
+  }
+
+  // Get weekly leaderboard
+  public async getWeeklyLeaderboard(gameId: string, roomId?: string, weekId?: string): Promise<ScoreRecord[]> {
+    const finalWeekId = weekId || getCurrentWeekId();
+    try {
+      let query = supabase
+        .from("scores")
+        .select("*")
+        .eq("game_id", gameId)
+        .eq("week_id", finalWeekId);
+
+      if (roomId) {
+        query = query.eq("room_id", roomId.toLowerCase().trim());
+      }
+
+      const { data, error } = await query;
+      if (error || !data) return [];
+
+      const mapped: ScoreRecord[] = data.map(s => ({
+        id: s.id,
+        player: s.player,
+        score: s.score,
+        gameId: s.game_id,
+        roomId: s.room_id,
+        date: s.date,
+        timestamp: s.timestamp,
+        weekId: s.week_id
+      }));
+
+      return mapped.sort((a, b) => b.score - a.score || new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    } catch (e) {
+      console.error("❌ Fallo al consultar leaderboard semanal", e);
+      return [];
+    }
+  }
+
+  // Get global leaderboard grouped by max score
+  public async getGlobalLeaderboard(gameId: string, roomId?: string): Promise<ScoreRecord[]> {
+    try {
+      let query = supabase
+        .from("scores")
+        .select("*")
+        .eq("game_id", gameId);
+
+      if (roomId) {
+        query = query.eq("room_id", roomId.toLowerCase().trim());
+      }
+
+      const { data, error } = await query;
+      if (error || !data) return [];
+
+      const maxScores: Record<string, ScoreRecord> = {};
+      data.forEach(s => {
+        const key = s.player.toLowerCase();
+        if (!maxScores[key] || s.score > maxScores[key].score) {
+          maxScores[key] = {
+            id: s.id,
+            player: s.player,
+            score: s.score,
+            gameId: s.game_id,
+            roomId: s.room_id,
+            date: s.date,
+            timestamp: s.timestamp,
+            weekId: s.week_id
+          };
+        }
       });
 
-      this.save();
+      return Object.values(maxScores).sort((a, b) => b.score - a.score);
+    } catch (e) {
+      console.error("❌ Fallo al consultar leaderboard global", e);
+      return [];
     }
-
-    this.save();
-    return newRecord;
   }
 
-  // Get weekly leaderboard (historical or current week)
-  public getWeeklyLeaderboard(gameId: string, roomId?: string, weekId?: string): ScoreRecord[] {
-    const finalWeekId = weekId || getCurrentWeekId();
-    let filtered = this.data.scores.filter(
-      s => s.gameId === gameId && (s.weekId === finalWeekId || (!s.weekId && finalWeekId === "2026-W22"))
-    );
-
-    if (roomId) {
-      const cleanRoom = roomId.toLowerCase().trim();
-      filtered = filtered.filter(s => s.roomId === cleanRoom);
-    }
-
-    // Sort by score desc, then by date oldest to give advantage to the quicker score
-    return filtered.sort((a, b) => b.score - a.score || new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-  }
-
-  // Backwards compatibility daily scores fallback
-  public getDailyLeaderboard(gameId: string, roomId?: string): ScoreRecord[] {
-    const today = new Date().toISOString().split("T")[0];
-    let filtered = this.data.scores.filter(
-      s => s.gameId === gameId && s.date === today
-    );
-
-    if (roomId) {
-      const cleanRoom = roomId.toLowerCase().trim();
-      filtered = filtered.filter(s => s.roomId === cleanRoom);
-    }
-
-    return filtered.sort((a, b) => b.score - a.score || new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-  }
-
-  // Get all-time global leaderboard
-  public getGlobalLeaderboard(gameId: string, roomId?: string): any[] {
-    let filtered = this.data.scores.filter(s => s.gameId === gameId);
-
-    if (roomId) {
-      const cleanRoom = roomId.toLowerCase().trim();
-      filtered = filtered.filter(s => s.roomId === cleanRoom);
-    }
-
-    // Group by player name and take their max score
-    const maxScores: Record<string, ScoreRecord> = {};
-    filtered.forEach(record => {
-      const key = record.player.toLowerCase();
-      if (!maxScores[key] || record.score > maxScores[key].score) {
-        maxScores[key] = record;
-      }
-    });
-
-    return Object.values(maxScores).sort((a, b) => b.score - a.score);
-  }
-
-  // Helper for all games reference lists
   public getAllGames(): Game[] {
     return GAMES;
   }
 }
 
 const supaDB = new SupaDB();
+const app = express();
 
-async function startServer() {
-  const app = express();
-  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+// Middleware for body parsing
+app.use(express.json());
 
-  // Middleware for body parsing
-  app.use(express.json());
+// Log simple requests
+app.use((req, res, next) => {
+  console.log(`[${req.method}] ${req.url}`);
+  next();
+});
 
-  // Log simple requests
-  app.use((req, res, next) => {
-    console.log(`[${req.method}] ${req.url}`);
-    next();
+// API REST endpoints
+app.get("/api/games", (req, res) => {
+  res.json({ games: supaDB.getAllGames() });
+});
+
+app.get("/api/game/today", async (req, res) => {
+  const dailyGame = await supaDB.getDailyGame();
+  res.json({ dailyGame });
+});
+
+app.post("/api/admin/set-game", async (req, res) => {
+  const { gameId } = req.body;
+  if (!gameId) {
+     res.status(400).json({ error: "Debe proveer gameId" });
+     return;
+  }
+  const success = await supaDB.setDailyGame(gameId);
+  if (success) {
+    res.json({ success: true, dailyGame: await supaDB.getDailyGame() });
+  } else {
+    res.status(400).json({ error: "Juego no encontrado o inválido" });
+  }
+});
+
+app.post("/api/rooms/create", async (req, res) => {
+  const { name, creator } = req.body;
+  if (!name || !creator) {
+    res.status(400).json({ error: "Falta el nombre de la sala o del creador" });
+    return;
+  }
+  const room = await supaDB.createRoom(name, creator);
+  res.json({ room });
+});
+
+app.post("/api/rooms/join", async (req, res) => {
+  const { code, nickname } = req.body;
+  if (!code || !nickname) {
+    res.status(400).json({ error: "Falta el código de sala o tu nombre de usuario" });
+    return;
+  }
+  const room = await supaDB.joinRoom(code, nickname);
+  if (!room) {
+    res.status(404).json({ error: "Sala no encontrada o inactiva" });
+    return;
+  }
+  res.json({ room });
+});
+
+app.get("/api/rooms/:code", async (req, res) => {
+  const { code } = req.params;
+  const room = await supaDB.getRoom(code);
+  if (!room) {
+    res.status(404).json({ error: "Sala no encontrada" });
+    return;
+  }
+  res.json({ room });
+});
+
+app.post("/api/rooms/:code/chat", async (req, res) => {
+  const { code } = req.params;
+  const { sender, text } = req.body;
+  if (!sender || !text) {
+    res.status(400).json({ error: "Falta remitente o texto del mensaje" });
+    return;
+  }
+  const msg = await supaDB.addMessage(code, sender, text);
+  if (!msg) {
+    res.status(404).json({ error: "Sala no encontrada" });
+    return;
+  }
+  res.json({ message: msg });
+});
+
+app.get("/api/weeks", (req, res) => {
+  const currentWeekId = getCurrentWeekId();
+  const todayStr = new Date().toISOString().split("T")[0];
+  const responseWeeks = WEEKS_DATA.map(w => {
+    return {
+      ...w,
+      isCurrent: w.id === currentWeekId,
+      isClosed: todayStr > w.endDate
+    };
   });
+  res.json({ weeks: responseWeeks, currentWeekId });
+});
 
-  // API REST endpoints
-  app.get("/api/games", (req, res) => {
-    res.json({ games: supaDB.getAllGames() });
+app.post("/api/rooms/:code/score", async (req, res) => {
+  const { code } = req.params;
+  const { player, score, gameId, weekId } = req.body;
+  if (!player || score === undefined || !gameId) {
+    res.status(400).json({ error: "Faltan parámetros del puntaje" });
+    return;
+  }
+  
+  const targetWeekId = weekId || getCurrentWeekId();
+  const todayStr = new Date().toISOString().split("T")[0];
+  const targetWeek = WEEKS_DATA.find(w => w.id === targetWeekId);
+  
+  if (targetWeek && todayStr > targetWeek.endDate) {
+    res.status(400).json({ error: "La clasificación de esta semana ya ha finalizado. Puedes seguir practicando, pero el podio oficial competitiva está cerrado." });
+    return;
+  }
+
+  // Check if room exists
+  const room = await supaDB.getRoom(code);
+  if (!room) {
+    res.status(404).json({ error: "Sala no encontrada" });
+    return;
+  }
+
+  const record = await supaDB.submitScore(player, score, gameId, code, targetWeekId);
+  res.json({ success: true, score: record });
+});
+
+// Global / local Leaderboards
+app.get("/api/leaderboards", async (req, res) => {
+  const gameId = req.query.gameId as string || "clicker_veloz";
+  const roomId = req.query.roomId as string || undefined;
+  const weekId = req.query.weekId as string || getCurrentWeekId();
+
+  const daily = await supaDB.getWeeklyLeaderboard(gameId, roomId, weekId);
+  const globalList = await supaDB.getGlobalLeaderboard(gameId, roomId);
+
+  res.json({
+    daily,
+    global: globalList
   });
+});
 
-  app.get("/api/game/today", (req, res) => {
-    res.json({ dailyGame: supaDB.getDailyGame() });
-  });
-
-  app.post("/api/admin/set-game", (req, res) => {
-    const { gameId } = req.body;
-    if (!gameId) {
-       res.status(400).json({ error: "Debe proveer gameId" });
-       return;
-    }
-    const success = supaDB.setDailyGame(gameId);
-    if (success) {
-      res.json({ success: true, dailyGame: supaDB.getDailyGame() });
-    } else {
-      res.status(400).json({ error: "Juego no encontrado o inválido" });
-    }
-  });
-
-  app.post("/api/rooms/create", (req, res) => {
-    const { name, creator } = req.body;
-    if (!name || !creator) {
-      res.status(400).json({ error: "Falta el nombre de la sala o del creador" });
-      return;
-    }
-    const room = supaDB.createRoom(name, creator);
-    res.json({ room });
-  });
-
-  app.post("/api/rooms/join", (req, res) => {
-    const { code, nickname } = req.body;
-    if (!code || !nickname) {
-      res.status(400).json({ error: "Falta el código de sala o tu nombre de usuario" });
-      return;
-    }
-    const room = supaDB.joinRoom(code, nickname);
-    if (!room) {
-      res.status(404).json({ error: "Sala no encontrada" });
-      return;
-    }
-    res.json({ room });
-  });
-
-  app.get("/api/rooms/:code", (req, res) => {
-    const { code } = req.params;
-    const room = supaDB.getRoom(code);
-    if (!room) {
-      res.status(404).json({ error: "Sala no encontrada" });
-      return;
-    }
-    res.json({ room });
-  });
-
-  app.post("/api/rooms/:code/chat", (req, res) => {
-    const { code } = req.params;
-    const { sender, text } = req.body;
-    if (!sender || !text) {
-      res.status(400).json({ error: "Falta remitente o texto del mensaje" });
-      return;
-    }
-    const msg = supaDB.addMessage(code, sender, text);
-    if (!msg) {
-      res.status(404).json({ error: "Sala no encontrada" });
-      return;
-    }
-    res.json({ message: msg });
-  });
-
-  app.get("/api/weeks", (req, res) => {
-    const currentWeekId = getCurrentWeekId();
-    const todayStr = new Date().toISOString().split("T")[0];
-    const responseWeeks = WEEKS_DATA.map(w => {
-      return {
-        ...w,
-        isCurrent: w.id === currentWeekId,
-        isClosed: todayStr > w.endDate
-      };
-    });
-    res.json({ weeks: responseWeeks, currentWeekId });
-  });
-
-  app.post("/api/rooms/:code/score", (req, res) => {
-    const { code } = req.params;
-    const { player, score, gameId, weekId } = req.body;
-    if (!player || score === undefined || !gameId) {
-      res.status(400).json({ error: "Faltan parámetros del puntaje" });
-      return;
-    }
-    
-    const targetWeekId = weekId || getCurrentWeekId();
-    const todayStr = new Date().toISOString().split("T")[0];
-    const targetWeek = WEEKS_DATA.find(w => w.id === targetWeekId);
-    
-    if (targetWeek && todayStr > targetWeek.endDate) {
-      res.status(400).json({ error: "La clasificación de esta semana ya ha finalizado. Puedes seguir practicando, pero el podio oficial competitiva está cerrado." });
-      return;
-    }
-
-    // Check if room exists
-    const room = supaDB.getRoom(code);
-    if (!room) {
-      res.status(404).json({ error: "Sala no encontrada" });
-      return;
-    }
-
-    const record = supaDB.submitScore(player, score, gameId, code, targetWeekId);
-    res.json({ success: true, score: record });
-  });
-
-  // Global / local Leaderboards
-  app.get("/api/leaderboards", (req, res) => {
-    const gameId = req.query.gameId as string || "clicker_veloz";
-    const roomId = req.query.roomId as string || undefined;
-    const weekId = req.query.weekId as string || getCurrentWeekId();
-
-    const daily = supaDB.getWeeklyLeaderboard(gameId, roomId, weekId);
-    const globalList = supaDB.getGlobalLeaderboard(gameId, roomId);
-
-    res.json({
-      daily,
-      global: globalList
-    });
-  });
-
-  // Vite Integration
+// Vite Integration & Listener Setup
+async function setupServer() {
   if (process.env.NODE_ENV !== "production") {
+    // Use dynamic imports to prevent packaging Vite inside production/Vercel serverless environment
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
@@ -585,15 +707,26 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
+    if (fs.existsSync(distPath)) {
+      app.use(express.static(distPath));
+      app.get("*", (req, res) => {
+        res.sendFile(path.join(distPath, "index.html"));
+      });
+    }
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`🚀 Portal de Juegos running on http://localhost:${PORT}`);
-  });
+  // Start standalone listener when running locally or in standard environments (like Render)
+  if (process.env.NODE_ENV !== "production" || !process.env.VERCEL) {
+    const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`🚀 Portal de Juegos running on http://localhost:${PORT}`);
+    });
+  }
 }
 
-startServer();
+setupServer().catch(err => {
+  console.error("❌ Fallo al inicializar el servidor", err);
+});
+
+// Export default app for Vercel serverless integration
+export default app;
