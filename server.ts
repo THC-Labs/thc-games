@@ -200,7 +200,13 @@ class SupaDB {
         .eq("code", cleanCode)
         .single();
 
-      if (error || !data) return null;
+      if (error) {
+        if (error.code !== "PGRST116") { // PGRST116 is normal "no rows found"
+          console.error("❌ Supabase: Error fetching room:", error.message, error.details);
+        }
+        return null;
+      }
+      if (!data) return null;
       
       return {
         code: data.code,
@@ -260,7 +266,7 @@ class SupaDB {
     };
 
     try {
-      await supabase
+      const { error } = await supabase
         .from("rooms")
         .insert({
           code,
@@ -271,8 +277,14 @@ class SupaDB {
           notifications: newRoom.notifications,
           created_at: newRoom.createdAt
         });
+      
+      if (error) {
+        console.error("❌ Supabase Error inserting room:", error.message, error.details, error.hint);
+        throw new Error(`Supabase insert failed: ${error.message}`);
+      }
     } catch (e) {
       console.error("❌ Fallo al insertar sala en Supabase", e);
+      throw e;
     }
 
     return newRoom;
@@ -309,7 +321,7 @@ class SupaDB {
       });
 
       try {
-        await supabase
+        const { error } = await supabase
           .from("rooms")
           .update({
             players: room.players,
@@ -317,6 +329,10 @@ class SupaDB {
             notifications: room.notifications
           })
           .eq("code", room.code);
+        
+        if (error) {
+          console.error("❌ Supabase Error updating room (join):", error.message, error.details);
+        }
       } catch (e) {
         console.error("❌ Fallo al actualizar sala unida en Supabase", e);
       }
@@ -343,10 +359,15 @@ class SupaDB {
     }
 
     try {
-      await supabase
+      const { error } = await supabase
         .from("rooms")
         .update({ messages: room.messages })
         .eq("code", room.code);
+      
+      if (error) {
+        console.error("❌ Supabase Error updating messages:", error.message, error.details);
+        return null;
+      }
     } catch (e) {
       console.error("❌ Fallo al añadir mensaje en Supabase", e);
       return null;
@@ -372,7 +393,7 @@ class SupaDB {
 
     try {
       // Check if there is an existing record
-      const { data: existing, error } = await supabase
+      const { data: existing, error: fetchErr } = await supabase
         .from("scores")
         .select("*")
         .eq("player", player)
@@ -381,9 +402,13 @@ class SupaDB {
         .eq("week_id", finalWeekId)
         .maybeSingle();
 
+      if (fetchErr) {
+        console.error("❌ Supabase Error fetching score record:", fetchErr.message, fetchErr.details);
+      }
+
       if (existing) {
         if (score > existing.score) {
-          await supabase
+          const { error: updateErr } = await supabase
             .from("scores")
             .update({
               score,
@@ -391,6 +416,10 @@ class SupaDB {
               date
             })
             .eq("id", existing.id);
+
+          if (updateErr) {
+            console.error("❌ Supabase Error updating score:", updateErr.message, updateErr.details);
+          }
 
           finalRecord = {
             id: existing.id,
@@ -416,7 +445,7 @@ class SupaDB {
         }
       } else {
         const id = `score-${Date.now()}-${Math.random()}`;
-        await supabase
+        const { error: insertErr } = await supabase
           .from("scores")
           .insert({
             id,
@@ -428,6 +457,10 @@ class SupaDB {
             timestamp,
             week_id: finalWeekId
           });
+
+        if (insertErr) {
+          console.error("❌ Supabase Error inserting score:", insertErr.message, insertErr.details);
+        }
 
         finalRecord = {
           id,
@@ -452,10 +485,14 @@ class SupaDB {
           timestamp
         });
 
-        await supabase
+        const { error: roomUpdateErr } = await supabase
           .from("rooms")
           .update({ notifications: room.notifications })
           .eq("code", room.code);
+        
+        if (roomUpdateErr) {
+          console.error("❌ Supabase Error updating room notifications:", roomUpdateErr.message, roomUpdateErr.details);
+        }
       }
     } catch (e) {
       console.error("❌ Fallo al subir puntaje en Supabase", e);
